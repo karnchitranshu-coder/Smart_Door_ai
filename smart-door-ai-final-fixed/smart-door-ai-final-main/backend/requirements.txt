@@ -1,4 +1,4 @@
-# Light install (works with AI_BACKEND=mock, deploys on free hosts)
+# Light install (works with OpenCV/InsightFace/mock, deploys on free hosts & Supabase)
 Django>=5.0,<6.0
 djangorestframework>=3.15
 djangorestframework-simplejwt>=5.3
@@ -9,5 +9,6 @@ Pillow>=10.0
 gunicorn>=22.0
 whitenoise>=6.6
 dj-database-url>=2.1
-psycopg2-binary>=2.9
+psycopg[binary]>=3.2
 paho-mqtt>=2.0
+pyserial>=3.5

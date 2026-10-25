@@ -1,0 +1,22 @@
+# Python / Django
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+db.sqlite3
+db.sqlite3-journal
+staticfiles/
+data/faces/
+
+# Node / Vite
+node_modules/
+dist/
+.vite/
+
+# Environment secrets (keep .env.example)
+.env
+.env.local
+.env.*.local
+!.env.example

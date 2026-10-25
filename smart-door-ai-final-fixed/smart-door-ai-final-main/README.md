@@ -1,53 +1,49 @@
 # 🚪 Smart Door AI
 
-Face-recognition smart door lock: **Django REST backend** + **React dashboard** + **ESP32 / MQTT** door controller.
+AI-based IoT Smart Door Access Control System using Face Recognition, Liveness Verification, **Supabase (PostgreSQL)**, **Django REST API**, **React Dashboard**, and **ESP32 (Servo / Serial & MQTT)**.
 
 ```
 smart-door-ai/
-├── backend/      Django + DRF + SimpleJWT  (AI pipeline, access control, IoT)
-├── frontend/     React + Vite + Tailwind dashboard  → deploy on Vercel
-├── esp32/        Arduino firmware + wiring
+├── backend/      Django + DRF + SimpleJWT  (AI pipeline, access control, IoT, Supabase)
+├── frontend/     React + Vite + Tailwind dashboard
+├── esp32/        Arduino firmware (USB Serial + Servo & Wi-Fi MQTT + Relay)
+├── supabase/     Supabase PostgreSQL schema (schema.sql)
 ├── mosquitto/    MQTT broker config
-├── docs/         architecture, setup, deployment, api, hardware, security, demo
-├── docker-compose.yml   backend + Mosquitto
-└── render.yaml          one-click backend deploy on Render
+├── docs/         Architecture, setup, deployment, API, hardware, security, demo
+├── docker-compose.yml   Backend + Mosquitto
+└── render.yaml          One-click backend deploy on Render
 ```
 
-## Quick start (local)
+## Quick Start (Local)
+
 ```bash
-# 1) backend
+# 1) Backend
 cd backend
-python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
-pip install -r requirements.txt -r requirements-ai.txt # real recognition; needs OpenCV/InsightFace build deps
-cp .env.example .env                                    # Windows: copy .env.example .env
-#   edit .env -> DEBUG=1, AI_BACKEND=mock (or insightface), ADMIN_PASSWORD=...
+pip install -r requirements.txt
+# Edit backend/.env to add your Supabase DATABASE_URL (automatically falls back to local SQLite if blank)
 python manage.py migrate && python manage.py seed
 python manage.py runserver
 
-# 2) frontend (new terminal)
+# 2) Frontend (new terminal)
 cd frontend
-cp .env.example .env                                    # VITE_API_URL=http://localhost:8000
 npm install && npm run dev                              # http://localhost:5173
 ```
-Login with `ADMIN_USERNAME` / `ADMIN_PASSWORD` from `backend/.env` (default `admin` / `admin12345` if unset).
 
-## Real face recognition vs demo mode
-- `AI_BACKEND=insightface` uses real InsightFace/ArcFace recognition and needs a host with ~2 GB RAM or more.
-- `AI_BACKEND=mock` is only for automated tests/demo API flows. It does **not** perform real face recognition and the app now fails closed instead of unlocking from mock embeddings.
-- The Render free blueprint intentionally uses `mock` because its memory is insufficient for InsightFace. Use a suitable VPS/paid host for real recognition.
+Login with `ADMIN_USERNAME` / `ADMIN_PASSWORD` from `backend/.env` (default `admin` / `admin12345`).
 
-## Go live → see [docs/deployment.md](docs/deployment.md)
-Frontend → **Vercel**, backend → **Render** (or any Docker host). Vercel cannot run the Django/AI backend (serverless: no long-running threads, no MQTT, size limits), so they are deployed separately.
+## Supabase Database Setup
 
-## Modes
+1. Create a project at [supabase.com](https://supabase.com).
+2. Copy your **Transaction Pooler** or **Session Pooler** URI from **Project Settings → Database → Connection string** and set it in `backend/.env`:
+   ```env
+   DATABASE_URL=postgresql://postgres.[project-ref]:[password]@aws-0-[region].pooler.supabase.com:6543/postgres?sslmode=require
+   ```
+3. Run `python manage.py migrate && python manage.py seed` (or execute `supabase/schema.sql` in the Supabase SQL Editor).
+4. **Optional REST Sync**: You can also set `SUPABASE_URL` and `SUPABASE_KEY` in `backend/.env` to mirror users, face embeddings, and access logs via Supabase PostgREST when running with a local SQLite cache (`SUPABASE_FALLBACK_SQLITE=1`).
+
+## AI & IoT Modes
+
 | Setting | Values | Meaning |
 |---|---|---|
-| `AI_BACKEND` | `mock` / `insightface` | fake embeddings (cloud demo) vs real ArcFace |
-| `IOT_MODE` | `demo` / `real` | software door vs MQTT → ESP32 |
-
-## Local real-AI Docker setup (recommended for actual recognition)
-1. Copy `backend/.env.example` to `backend/.env` and change `SECRET_KEY`, `ADMIN_PASSWORD`, and `DEVICE_API_KEY` to strong random values.
-2. Keep `AI_BACKEND=insightface` and `ALLOW_MOCK_RECOGNITION=0`.
-3. Run `docker compose up --build` on a machine/VPS with at least about 2 GB RAM. First-time model initialization may take a while and downloads model weights.
-4. In `frontend/.env.example`, use `VITE_API_URL=http://localhost:8000` for local development. Run `cd frontend && npm install && npm run dev`.
-5. Open `http://localhost:5173`. For an actual door, configure and test MQTT/ESP32 separately; the default `IOT_MODE=demo` is a virtual door only.
+| `AI_BACKEND` | `auto` / `insightface` / `opencv` / `mock` | `auto` uses InsightFace (RetinaFace + ArcFace) if installed, or falls back to real OpenCV Haar + CLAHE/HOG/DCT 512-d face recognition & eye/motion liveness |
+| `IOT_MODE` | `demo` / `serial` / `real` | `demo` = virtual timer door, `serial` = USB PySerial to ESP32 Servo (`UNLOCK:<sec>` / `LOCK`), `real` = MQTT to ESP32 |

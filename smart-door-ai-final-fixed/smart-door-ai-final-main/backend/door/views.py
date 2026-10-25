@@ -1,6 +1,5 @@
 import uuid
 from datetime import timedelta
-import importlib.util
 
 from django.conf import settings
 from django.http import HttpResponse, StreamingHttpResponse
@@ -8,18 +7,19 @@ from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import api_view, authentication_classes, permission_classes
 from rest_framework.generics import ListAPIView
-from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import AccessToken
 
+from .ai import detector
 from .ai.cache import cache
-from .ai.pipeline import pipeline
+from .ai.pipeline import active_ai_backend, pipeline
 from .iot import get_controller
 from .models import AccessLog, FaceProfile, IoTDevice, Person
 from .serializers import (AccessLogSerializer, CommandSerializer, EnrollSerializer,
                           IoTDeviceSerializer, PersonSerializer, UnlockSerializer)
-from .services import access_control, settings_service
+from .services import access_control, settings_service, supabase_service
 from .services.camera_service import camera
 from .services.log_service import log_event, query_logs
 from .services.user_service import delete_person
@@ -31,18 +31,22 @@ MAX_SAMPLES = 10
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def health(request):
-    real_ai = (settings.AI_BACKEND == "insightface" and
-               importlib.util.find_spec("insightface") is not None and
-               importlib.util.find_spec("onnxruntime") is not None)
+    effective_ai = active_ai_backend()
+    real_ai = effective_ai in ("insightface", "opencv")
     mock_allowed = bool(getattr(settings, "ALLOW_MOCK_RECOGNITION", False))
+    db_info = supabase_service.get_status()
     return Response({
         "status": "ok",
-        "ai_backend": settings.AI_BACKEND,
+        "ai_backend": effective_ai,
+        "configured_ai_backend": settings.AI_BACKEND,
+        "insightface_installed": detector.has_insightface(),
+        "opencv_installed": detector.has_opencv(),
         "ai_dependencies_installed": bool(real_ai),
         "iot_mode": settings.IOT_MODE,
         "face_recognition_available": real_ai or mock_allowed,
         "mode": "real" if real_ai else ("test-mock" if mock_allowed else "demo-only"),
-        "warning": None if real_ai else "Real face recognition is disabled. Deploy with AI_BACKEND=insightface on a host with sufficient RAM.",
+        "database": db_info,
+        "warning": None if real_ai else "Real face recognition is disabled. Set AI_BACKEND=auto, insightface, or opencv.",
     })
 
 
@@ -57,9 +61,14 @@ class PersonViewSet(viewsets.ModelViewSet):
     queryset = Person.objects.all().order_by("-created_at")
     serializer_class = PersonSerializer
 
+    def perform_create(self, serializer):
+        person = serializer.save()
+        supabase_service.sync_person(person)
+
     def perform_update(self, serializer):
-        serializer.save()
+        person = serializer.save()
         cache.reload()                       # status may have changed (active/disabled)
+        supabase_service.sync_person(person)
 
     def perform_destroy(self, instance):
         delete_person(instance)
@@ -70,10 +79,16 @@ class EnrollView(APIView):
     """POST multipart: person_id + one or more `image` files. Rejects low-quality samples."""
 
     def post(self, request):
-        if settings.AI_BACKEND == "mock" and not getattr(settings, "ALLOW_MOCK_RECOGNITION", False):
-            return Response({"detail": "Real face enrollment is disabled because AI_BACKEND=mock. Configure AI_BACKEND=insightface on a host with sufficient RAM."}, status=503)
-        s = EnrollSerializer(data={"person_id": request.data.get("person_id"),
-                                   "image": request.FILES.getlist("image")})
+        effective_ai = active_ai_backend()
+        if effective_ai == "mock" and not getattr(settings, "ALLOW_MOCK_RECOGNITION", False):
+            return Response(
+                {"detail": "Real face enrollment is disabled because AI_BACKEND=mock. Configure AI_BACKEND=auto, opencv, or insightface."},
+                status=503,
+            )
+        files = request.FILES.getlist("image")
+        if not files:
+            return Response({"detail": "At least one image file is required."}, status=400)
+        s = EnrollSerializer(data={"person_id": request.data.get("person_id"), "image": files})
         s.is_valid(raise_exception=True)
         try:
             person = Person.objects.get(pk=s.validated_data["person_id"])
@@ -99,8 +114,13 @@ class EnrollView(APIView):
                     cv2.imwrite(path, r.crop)
                 except Exception:
                     path = ""
-            FaceProfile.objects.create(person=person, embedding=r.embedding.tolist(),
-                                       quality=r.quality, image_path=path)
+            fp = FaceProfile.objects.create(
+                person=person,
+                embedding=r.embedding.tolist(),
+                quality=r.quality,
+                image_path=path,
+            )
+            supabase_service.sync_face_profile(fp)
             saved += 1
         cache.reload()
         code = status.HTTP_201_CREATED if saved else status.HTTP_422_UNPROCESSABLE_ENTITY
@@ -209,9 +229,15 @@ def iot_heartbeat(request):
     device_id = request.data.get("device_id")
     if not device_id:
         return Response({"detail": "device_id required"}, status=400)
-    IoTDevice.objects.update_or_create(device_id=device_id, defaults={
-        "connection_status": "online", "door_state": request.data.get("state", "locked"),
-        "last_heartbeat": timezone.now(), "firmware": request.data.get("fw", "")})
+    IoTDevice.objects.update_or_create(
+        device_id=device_id,
+        defaults={
+            "connection_status": "online",
+            "door_state": request.data.get("state", "locked"),
+            "last_heartbeat": timezone.now(),
+            "firmware": request.data.get("fw", ""),
+        },
+    )
     return Response({"ok": True})
 
 
@@ -241,5 +267,7 @@ def dashboard_stats(request):
         "denied_24h": recent.filter(event_type__in=["UNKNOWN", "DENIED", "LIVENESS_FAIL", "LOCKOUT"]).count(),
         "devices_online": IoTDevice.objects.filter(connection_status="online").count(),
         "door": get_controller().status(),
+        "database": supabase_service.get_status(),
+        "ai_backend": active_ai_backend(),
         "recent": AccessLogSerializer(AccessLog.objects.select_related("person")[:8], many=True).data,
     })

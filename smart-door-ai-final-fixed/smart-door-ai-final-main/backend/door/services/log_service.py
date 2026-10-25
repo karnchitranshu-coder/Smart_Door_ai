@@ -1,9 +1,17 @@
 from ..models import AccessLog
+from . import supabase_service
 
 
 def log_event(event_type, person=None, confidence=None, device="", detail=""):
-    return AccessLog.objects.create(person=person, event_type=event_type,
-                                    confidence=confidence, device=device, detail=detail)
+    obj = AccessLog.objects.create(
+        person=person,
+        event_type=event_type,
+        confidence=confidence,
+        device=device,
+        detail=detail,
+    )
+    supabase_service.sync_access_log(obj)
+    return obj
 
 
 def query_logs(params):
